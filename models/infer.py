@@ -33,9 +33,13 @@ def _decoder_for_state_dim(state_dim: int):
         from br_scene_state_v2 import decode_state
 
         return decode_state
+    if state_dim == 35:
+        from br_scene_state_v3 import decode_state
+
+        return decode_state
     raise RuntimeError(
         f"No scene decoder registered for state_dim={state_dim}. "
-        "Expected v1=9 or v2=34."
+        "Expected v1=9, v2=34, or v3=35."
     )
 
 
