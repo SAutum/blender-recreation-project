@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Synthetic datasets and rendered images
+data/
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Local experiment outputs
+results/runs/
+
+# LaTeX build products
+*.aux
+*.log
+*.out
+*.toc
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
