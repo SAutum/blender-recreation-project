@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,8 @@ def main() -> None:
     run_config["data"] = str(run_config["data"])
     run_config["run"] = str(run_config["run"])
     run_config["device"] = str(device)
+    run_config["model"] = "ConditionalStateDenoiser(CNN image encoder + MLP DDPM state denoiser)"
+    run_config["started_at"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     run_config["train_samples"] = len(train_ds)
     run_config["val_samples"] = len(val_ds)
     (args.run / "run_config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
