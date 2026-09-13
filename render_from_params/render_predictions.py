@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from batch_renderer.generate_dataset import assert_cycles_active, build_scene as build_scene_v1
 from batch_renderer.generate_dataset_v2 import build_scene as build_scene_v2
+from batch_renderer.generate_dataset_v3 import build_scene as build_scene_v3
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,10 +29,19 @@ def parse_args() -> argparse.Namespace:
 
 
 def _build_scene(scene_spec: dict, width: int, height: int, samples: int):
-    # v2 scenes carry an explicit objects list. v1 scenes carry a single top-level
-    # shape/geometry pair. Predicted cameras are always rendered exactly as decoded;
-    # never auto-fit during evaluation.
-    if "objects" in scene_spec:
+    # Evaluation never auto-fits a predicted camera. v3 remains intrinsically valid
+    # because its camera orientation is reconstructed from target + roll rather than
+    # independently predicted Euler angles.
+    version = int(scene_spec.get("version", 1))
+    if version == 3:
+        return build_scene_v3(
+            scene_spec,
+            width,
+            height,
+            samples=samples,
+            fit_camera=False,
+        )
+    if version == 2 or "objects" in scene_spec:
         return build_scene_v2(
             scene_spec,
             width,
