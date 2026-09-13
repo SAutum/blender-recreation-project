@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--height", type=int, default=128)
     p.add_argument("--samples", type=int, default=16)
     p.add_argument("--max-scene-attempts", type=int, default=100)
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue an interrupted dataset from the existing metadata.jsonl instead of overwriting it.",
+    )
     return p.parse_args(argv)
 
 
@@ -321,6 +326,57 @@ def split_for_index(idx: int, count: int) -> str:
     return "train"
 
 
+def _read_completed_rows(metadata_path: Path) -> list[dict]:
+    if not metadata_path.exists():
+        return []
+    rows: list[dict] = []
+    with metadata_path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"Cannot resume: invalid JSON in {metadata_path} at line {line_no}"
+                ) from exc
+    return rows
+
+
+def _resume_start_index(metadata_path: Path, image_dir: Path, count: int) -> int:
+    rows = _read_completed_rows(metadata_path)
+    if not rows:
+        return 0
+
+    ids = [int(row["id"]) for row in rows]
+    expected = list(range(len(rows)))
+    if ids != expected:
+        raise RuntimeError(
+            "Cannot resume safely: metadata ids are not contiguous from 0. "
+            f"Last ids: {ids[-5:]}"
+        )
+    if len(rows) > count:
+        raise RuntimeError(
+            f"Existing dataset already has {len(rows)} rows, more than requested --count {count}"
+        )
+
+    # Verify the last completed render exists before appending more metadata.
+    last_id = ids[-1]
+    last_image = image_dir / f"{last_id:07d}.png"
+    if not last_image.exists():
+        raise RuntimeError(
+            f"Cannot resume safely: metadata says sample {last_id} is complete but {last_image} is missing"
+        )
+    return len(rows)
+
+
+def _rng_for_sample(seed: int, idx: int) -> random.Random:
+    # Per-sample RNG makes resumed generation deterministic from the resume point and
+    # prevents a restart from repeating the earliest scenes under new ids.
+    mixed = (int(seed) * 1_000_003 + int(idx) * 97_409 + 0x5F3759DF) & 0xFFFFFFFFFFFFFFFF
+    return random.Random(mixed)
+
+
 def main() -> None:
     args = parse_args()
     if not args.out.is_absolute():
@@ -328,52 +384,72 @@ def main() -> None:
     args.out = args.out.resolve()
     print(f"[blender-recreation] v3 dataset output: {args.out}")
 
-    rng = random.Random(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     image_dir = args.out / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
-
     metadata_path = args.out / "metadata.jsonl"
-    with metadata_path.open("w", encoding="utf-8") as f:
-        for idx in range(args.count):
-            last_error: Exception | None = None
-            for _attempt in range(args.max_scene_attempts):
-                spec = sample_scene(rng)
-                try:
-                    build_scene(
-                        spec,
-                        args.width,
-                        args.height,
-                        samples=args.samples,
-                        fit_camera=True,
-                    )
-                    last_error = None
-                    break
-                except RuntimeError as exc:
-                    last_error = exc
-            if last_error is not None:
-                raise RuntimeError(
-                    f"Failed to generate valid v3 scene for sample {idx} after "
-                    f"{args.max_scene_attempts} attempts"
-                ) from last_error
 
-            image_rel = Path("images") / f"{idx:07d}.png"
-            image_abs = args.out / image_rel
-            bpy.context.scene.render.filepath = str(image_abs)
-            assert_cycles_active()
-            bpy.ops.render.render(write_still=True)
+    if args.resume:
+        start_idx = _resume_start_index(metadata_path, image_dir, args.count)
+        mode = "a"
+        print(f"[blender-recreation] Resume enabled: {start_idx}/{args.count} samples already complete")
+    else:
+        start_idx = 0
+        mode = "w"
+        if metadata_path.exists():
+            print("[blender-recreation] Resume disabled: existing metadata will be overwritten")
 
-            row = {
-                "id": idx,
-                "image": image_rel.as_posix(),
-                "split": split_for_index(idx, args.count),
-                "scene": spec,
-                "state": encode_scene(spec).tolist(),
-            }
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if start_idx >= args.count:
+        print(f"[blender-recreation] Dataset already complete: {start_idx}/{args.count}")
+    else:
+        with metadata_path.open(mode, encoding="utf-8") as f:
+            for idx in range(start_idx, args.count):
+                rng = _rng_for_sample(args.seed, idx)
+                last_error: Exception | None = None
+                spec: dict | None = None
 
-            if (idx + 1) % 100 == 0 or idx == 0:
-                print(f"Rendered {idx + 1}/{args.count}")
+                for _attempt in range(args.max_scene_attempts):
+                    try:
+                        # sample_scene itself may reject an unlucky two-object layout;
+                        # that is a normal invalid candidate and must not abort the dataset.
+                        spec = sample_scene(rng)
+                        build_scene(
+                            spec,
+                            args.width,
+                            args.height,
+                            samples=args.samples,
+                            fit_camera=True,
+                        )
+                        last_error = None
+                        break
+                    except RuntimeError as exc:
+                        last_error = exc
+                        spec = None
+
+                if last_error is not None or spec is None:
+                    raise RuntimeError(
+                        f"Failed to generate valid v3 scene for sample {idx} after "
+                        f"{args.max_scene_attempts} attempts"
+                    ) from last_error
+
+                image_rel = Path("images") / f"{idx:07d}.png"
+                image_abs = args.out / image_rel
+                bpy.context.scene.render.filepath = str(image_abs)
+                assert_cycles_active()
+                bpy.ops.render.render(write_still=True)
+
+                row = {
+                    "id": idx,
+                    "image": image_rel.as_posix(),
+                    "split": split_for_index(idx, args.count),
+                    "scene": spec,
+                    "state": encode_scene(spec).tolist(),
+                }
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.flush()
+
+                if (idx + 1) % 100 == 0 or idx == start_idx:
+                    print(f"Rendered {idx + 1}/{args.count}")
 
     config = {
         "scene_version": 3,
@@ -393,6 +469,7 @@ def main() -> None:
             "Euler rotation is derived, never predicted"
         ),
         "camera_legality": "camera always looks at decoded scene centroid plus bounded target offset",
+        "resumable_generation": True,
     }
     (args.out / "dataset_config.json").write_text(
         json.dumps(config, indent=2), encoding="utf-8"
