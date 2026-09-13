@@ -4,76 +4,95 @@ Minimal experiment for **image -> Blender scene state -> real Blender rerender**
 
 The primary metric is image-space reconstruction after sending the predicted state back through Blender. Parameter errors are secondary because inverse graphics can have multiple valid states that render similarly.
 
-## v2: current experiment
+## v3: intrinsically valid camera experiment
 
-v2 deliberately makes the scene space much wider than the original toy problem:
+v2 exposed an important failure mode: diffusion could predict a plausible camera XYZ and a plausible camera Euler rotation independently, but the two did not necessarily agree. Many rerenders therefore looked into empty space and became black.
+
+v3 removes direct camera Euler prediction entirely.
+
+The camera is now represented by:
+
+```text
+azimuth
+elevation
+distance
+target offset xyz
+roll
+focal length
+```
+
+The target offset is not an unrestricted world-space point. It is decoded relative to the centroid of the decoded object positions. Blender then reconstructs the camera deterministically:
+
+```text
+predicted objects -> object centroid
+centroid + bounded target offset -> camera target
+azimuth/elevation/distance around target -> camera location
+look-at target + roll -> camera rotation
+```
+
+So camera position and orientation can no longer disagree independently. Evaluation still does **not** auto-fit or repair the predicted camera after inference.
+
+v3 keeps the rest of v2:
 
 - 1-2 primitives per image: `cube`, `sphere`, `cylinder`
 - per-object position, Euler rotation, type and geometry
-- variable camera position
-- explicit variable camera Euler rotation
 - variable focal length: 35-70 mm
-- fixed material, world and lighting for now
-- all generated object bounding boxes are constrained to remain inside the camera frame
-- object slots are sorted left-to-right in image space for a stable representation
+- fixed material, world and lighting
+- generated training scenes must keep all object bounding boxes in frame
+- object slots sorted left-to-right in image space
 
-The v2 state is fixed-length **34-D**:
+The v3 state is fixed-length **35-D**:
 
 ```text
 [num_objects,
- camera_xyz(3), camera_euler_xyz(3), focal_length(1),
+ camera_azimuth,
+ camera_elevation,
+ camera_distance,
+ camera_target_offset_xyz(3),
+ camera_roll,
+ focal_length,
  object_1: present + shape(3) + xyz(3) + euler_xyz(3) + geometry(3),
  object_2: present + shape(3) + xyz(3) + euler_xyz(3) + geometry(3)]
 ```
 
-`models.train` and `models.infer` detect the state dimension from the dataset/checkpoint, so the same model commands work for both v1 and v2. Old v1 checkpoints remain compatible.
-
-### 1. Generate a v2 dataset
-
-Run from the repository root:
+### 1. Generate a small v3 visual check
 
 ```powershell
 & "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" `
   --background `
-  --python batch_renderer/generate_dataset_v2.py `
+  --python batch_renderer/generate_dataset_v3.py `
   -- `
-  --out data/v2_5k `
-  --count 5000 `
+  --out data/v3_smoke20 `
+  --count 20 `
   --samples 16 `
   --seed 42
 ```
 
-The generator rejects/resamples scenes that cannot keep all primitives in frame.
+After visually checking those renders, generate 5k by changing `--out data/v3_5k --count 5000`.
 
 ### 2. Train
 
 ```powershell
 python -m models.train `
-  --data data/v2_5k `
-  --run results/runs/v2_5k_e20 `
+  --data data/v3_5k `
+  --run results/runs/v3_5k_e20 `
   --epochs 20 `
   --batch-size 64
 ```
 
-### 3. One-command post-training evaluation
+`models.train` detects the 35-D state automatically.
 
-After training, run the entire validation pipeline with one command:
+### 3. One-command post-training evaluation
 
 ```powershell
 python tools/evaluate_run.py `
-  --data data/v2_5k `
-  --run results/runs/v2_5k_e20 `
+  --data data/v3_5k `
+  --run results/runs/v3_5k_e20 `
   --samples-per-image 8 `
-  --limit 20
+  --limit 100
 ```
 
-By default it uses `<run>/best.pt` and Blender 5.2 at:
-
-```text
-C:\Program Files\Blender Foundation\Blender 5.2\blender.exe
-```
-
-The script runs, in order:
+The validation pipeline runs:
 
 ```text
 1. diffusion inference
@@ -84,32 +103,6 @@ The script runs, in order:
 6. benchmark
 ```
 
-Outputs are written directly into the run directory:
-
-```text
-predictions.jsonl
-pred_renders/
-random_predictions.jsonl
-random_renders/
-gt_predictions.jsonl
-gt_renders/
-benchmark_summary.json
-benchmark_metrics.csv
-```
-
-Useful overrides:
-
-```powershell
-python tools/evaluate_run.py `
-  --data data/v2_5k `
-  --run results/runs/v2_5k_e20 `
-  --checkpoint results/runs/v2_5k_e20/best.pt `
-  --samples-per-image 8 `
-  --limit 100 `
-  --render-samples 16 `
-  --blender "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
-```
-
 The key comparison remains:
 
 ```text
@@ -118,29 +111,40 @@ Diffusion best@K    ?
 Random best@K       ?
 ```
 
-The experiment is interesting when diffusion Best-of-K clearly beats the random valid-state Best-of-K baseline.
+## v2: free camera Euler experiment
+
+v2 uses a 34-D state with:
+
+```text
+camera XYZ + camera Euler XYZ + focal length
+```
+
+It remains in the repo for comparison, but it can generate invalid camera/location-orientation combinations at inference because camera position and orientation are independently predicted.
+
+Generate it with `batch_renderer/generate_dataset_v2.py`.
 
 ## v1: original toy experiment
 
-v1 remains available and unchanged at the data/schema level:
+v1 uses a 9-D state:
 
 - one primitive only
-- primitive: cube / sphere / cylinder
-- object fixed at origin with no object rotation
+- object fixed at origin
+- no object rotation
 - fixed 50 mm focal length
 - camera always looks at origin
-- 9-D state
 
-Generate it with `batch_renderer/generate_dataset.py`. Existing v1 datasets/checkpoints can still be trained, inferred and rendered with the shared model scripts.
+Generate it with `batch_renderer/generate_dataset.py`.
 
 ## Repository layout
 
 ```text
 batch_renderer/
   generate_dataset.py       v1 synthetic renderer
-  generate_dataset_v2.py    v2 multi-object renderer
+  generate_dataset_v2.py    v2 free-Euler multi-object renderer
+  generate_dataset_v3.py    v3 intrinsically valid-camera renderer
 br_scene_state.py           v1 9-D codec
 br_scene_state_v2.py        v2 34-D codec
+br_scene_state_v3.py        v3 35-D codec
 models/                     dataset, diffusion, training, inference, scorer, benchmark
 render_from_params/         real Blender rerender of predictions
 tools/evaluate_run.py       one-command post-training validation pipeline
