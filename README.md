@@ -1,122 +1,153 @@
 # Blender Recreation Project
 
-Minimal experiment for **image -> Blender scene parameters** using a small conditional diffusion model.
+Minimal experiment for **image -> Blender scene state -> real Blender rerender** using a conditional diffusion model.
 
-The first task is intentionally narrow:
+The primary metric is image-space reconstruction after sending the predicted state back through Blender. Parameter errors are secondary because inverse graphics can have multiple valid states that render similarly.
 
-- Input: Blender renders of one primitive (`cube`, `sphere`, `cylinder`).
-- Fixed lighting and world settings; no lighting randomization.
-- The camera always looks at the origin and the generated training object is guaranteed to fit inside the camera frame.
-- Output state: primitive type, camera XYZ, and primitive geometry parameters.
-- Main evaluation: render the predicted state back through Blender and compare the rendered image with the target image.
-- Secondary evaluation: compare predicted parameters with the synthetic ground truth. Parameter error is deliberately secondary because symmetric objects can have multiple equally valid camera solutions.
+## v2: current experiment
+
+v2 deliberately makes the scene space much wider than the original toy problem:
+
+- 1-2 primitives per image: `cube`, `sphere`, `cylinder`
+- per-object position, Euler rotation, type and geometry
+- variable camera position
+- explicit variable camera Euler rotation
+- variable focal length: 35-70 mm
+- fixed material, world and lighting for now
+- all generated object bounding boxes are constrained to remain inside the camera frame
+- object slots are sorted left-to-right in image space for a stable representation
+
+The v2 state is fixed-length **34-D**:
+
+```text
+[num_objects,
+ camera_xyz(3), camera_euler_xyz(3), focal_length(1),
+ object_1: present + shape(3) + xyz(3) + euler_xyz(3) + geometry(3),
+ object_2: present + shape(3) + xyz(3) + euler_xyz(3) + geometry(3)]
+```
+
+`models.train` and `models.infer` now detect the state dimension from the dataset/checkpoint, so the same model commands work for both v1 and v2. Old v1 checkpoints remain compatible.
+
+### 1. Generate a v2 smoke dataset
+
+Run from the repository root:
+
+```powershell
+& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" `
+  --background `
+  --python batch_renderer/generate_dataset_v2.py `
+  -- `
+  --out data/v2_smoke5000 `
+  --count 5000 `
+  --samples 16 `
+  --seed 42
+```
+
+The generator rejects/resamples scenes that cannot keep all primitives in frame.
+
+### 2. Train
+
+```powershell
+python -m models.train `
+  --data data/v2_smoke5000 `
+  --run results/runs/v2_smoke001 `
+  --epochs 50 `
+  --batch-size 64
+```
+
+### 3. Infer Blender scene states
+
+```powershell
+python -m models.infer `
+  --data data/v2_smoke5000 `
+  --checkpoint results/runs/v2_smoke001/best.pt `
+  --out results/runs/v2_smoke001/predictions.jsonl `
+  --split test `
+  --samples-per-image 8 `
+  --limit 100
+```
+
+### 4. Rerender predictions through Blender
+
+`render_predictions.py` auto-detects v1 vs v2 scene JSON.
+
+```powershell
+& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" `
+  --background `
+  --python render_from_params/render_predictions.py `
+  -- `
+  --predictions results/runs/v2_smoke001/predictions.jsonl `
+  --out results/runs/v2_smoke001/pred_renders `
+  --samples 16
+```
+
+### 5. Random-valid-state and GT baselines
+
+```powershell
+python -m models.make_baselines `
+  --data data/v2_smoke5000 `
+  --targets-from results/runs/v2_smoke001/predictions.jsonl `
+  --out results/runs/v2_smoke001
+```
+
+Render `random_predictions.jsonl` and `gt_predictions.jsonl` with the same `render_predictions.py` command, then run:
+
+```powershell
+python -m models.benchmark `
+  --data data/v2_smoke5000 `
+  --diffusion-predictions results/runs/v2_smoke001/predictions.jsonl `
+  --diffusion-renders results/runs/v2_smoke001/pred_renders `
+  --random-predictions results/runs/v2_smoke001/random_predictions.jsonl `
+  --random-renders results/runs/v2_smoke001/random_renders `
+  --gt-predictions results/runs/v2_smoke001/gt_predictions.jsonl `
+  --gt-renders results/runs/v2_smoke001/gt_renders `
+  --out results/runs/v2_smoke001
+```
+
+The key comparison remains:
+
+```text
+GT rerender        ~= 1.0
+Diffusion best@K    ?
+Random best@K       ?
+```
+
+The experiment is interesting when diffusion Best-of-K clearly beats the random valid-state Best-of-K baseline.
+
+## v1: original toy experiment
+
+v1 remains available and unchanged at the data/schema level:
+
+- one primitive only
+- primitive: cube / sphere / cylinder
+- object fixed at origin with no object rotation
+- fixed 50 mm focal length
+- camera always looks at origin
+- 9-D state
+
+Generate it with `batch_renderer/generate_dataset.py`. Existing v1 datasets/checkpoints can still be trained, inferred and rendered with the shared model scripts.
 
 ## Repository layout
 
 ```text
-batch_renderer/       synthetic Blender dataset generation
-models/               dataset, diffusion model, training, inference, scorer
-render_from_params/   render model-predicted scene parameters in Blender
-results/              experiment reporting (LaTeX/PDF) and local run outputs
-common/               shared state encoding/decoding
+batch_renderer/
+  generate_dataset.py       v1 synthetic renderer
+  generate_dataset_v2.py    v2 multi-object renderer
+br_scene_state.py           v1 9-D codec
+br_scene_state_v2.py        v2 34-D codec
+models/                     dataset, diffusion, training, inference, scorer, benchmark
+render_from_params/         real Blender rerender of predictions
+results/                    local experiment outputs/reporting
 ```
 
-## State vector
+## Diffusion formulation
 
-The first version uses a 9-D state:
+Training starts from a known Blender scene state `x0`, adds Gaussian noise to obtain `xt`, and asks the image-conditioned denoiser to predict the injected noise:
 
 ```text
-[shape_cube, shape_sphere, shape_cylinder,
- camera_x, camera_y, camera_z,
- geom_1, geom_2, geom_3]
+target image + noisy Blender state xt + timestep t -> predicted noise
 ```
 
-Shape entries are encoded as -1/+1 one-hot values. Camera and geometry values are normalized to roughly `[-1, 1]`.
+At inference there is no ground-truth state. Sampling starts from random state noise and repeatedly denoises it while conditioning on the target image. The final state is decoded into Blender-readable scene parameters and rerendered in Cycles.
 
-Geometry fields are interpreted as:
-
-- cube: `(size_x, size_y, size_z)`
-- sphere: `(radius, 0, 0)`
-- cylinder: `(radius, depth, 0)`
-
-The diffusion model denoises this state vector while conditioning on the target image.
-
-## Recommended first dataset size
-
-For this deliberately small state space:
-
-- **5k total renders**: smoke test only; enough to verify that the pipeline learns something.
-- **20k-30k renders**: minimum range where I would expect a meaningful first result.
-- **50k+ renders**: preferred first serious run, especially for testing multimodal camera solutions.
-
-The default generator count is 30,000 with a 90/5/5 train/validation/test split. Because the data are synthetic and low resolution, scaling the dataset later is straightforward.
-
-## 1. Generate synthetic data
-
-Run from the repository root. Example on Windows:
-
-```powershell
-& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python batch_renderer/generate_dataset.py -- --out data/v1 --count 30000 --seed 42
-```
-
-For a quick pipeline check, use `--count 1000` first.
-
-The generator writes:
-
-```text
-data/v1/
-  images/
-  metadata.jsonl
-  dataset_config.json
-```
-
-Images are intentionally ignored by git.
-
-## 2. Train the minimal diffusion model
-
-```powershell
-pip install -r requirements.txt
-python -m models.train --data data/v1 --run results/runs/exp001 --epochs 40 --batch-size 128
-```
-
-The model is a small CNN image encoder plus an MLP diffusion denoiser operating on the 9-D scene state. This is intentionally simple; the point of v1 is to validate the formulation, not architecture quality.
-
-## 3. Sample scene states from test images
-
-```powershell
-python -m models.infer --data data/v1 --checkpoint results/runs/exp001/best.pt --out results/runs/exp001/predictions.jsonl --split test --samples-per-image 8 --limit 500
-```
-
-Multiple samples are important because a plain cube/sphere/cylinder can have multiple camera states that explain nearly the same image.
-
-## 4. Render the model predictions through Blender
-
-```powershell
-& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --background --python render_from_params/render_predictions.py -- --predictions results/runs/exp001/predictions.jsonl --out results/runs/exp001/pred_renders
-```
-
-This step uses Blender as the real forward renderer. No surrogate renderer is used.
-
-## 5. Score reconstructed images
-
-```powershell
-python -m models.scorer --data data/v1 --predictions results/runs/exp001/predictions.jsonl --renders results/runs/exp001/pred_renders --out results/runs/exp001
-```
-
-The main score combines silhouette IoU and SSIM. For every target image the report also computes best-of-K, which is the important quantity for a multimodal inverse problem.
-
-## 6. Produce the experiment report
-
-```powershell
-python results/report.py --run results/runs/exp001 --data data/v1
-```
-
-This creates `report.tex` and plots. If `pdflatex` is installed, it also produces `report.pdf` automatically.
-
-## Why image-space score is primary
-
-For symmetric objects there can be several valid camera solutions. A camera parameter can therefore be numerically far from the synthetic ground truth while rendering an essentially identical image. The primary question is:
-
-> Does the predicted Blender state explain the observed image?
-
-Ground-truth parameter errors are still logged because they are useful diagnostics, but they are not the main success criterion.
+The training noise-prediction loss is only an optimization signal. The real project metric is whether the predicted Blender scene rerenders the target image accurately.
