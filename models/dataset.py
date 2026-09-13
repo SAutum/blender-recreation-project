@@ -37,7 +37,15 @@ class RenderedSceneDataset(Dataset):
                         break
         if not rows:
             raise RuntimeError(f"No samples found for split={split!r} in {self.root}")
+
         self.rows = rows
+        self.state_dim = len(self.rows[0]["state"])
+        for row in self.rows:
+            if len(row["state"]) != self.state_dim:
+                raise RuntimeError(
+                    f"Mixed state dimensions in {self.root}: expected {self.state_dim}, "
+                    f"got {len(row['state'])} for id={row.get('id')}"
+                )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -55,8 +63,7 @@ class RenderedSceneDataset(Dataset):
         state_t = torch.tensor(row["state"], dtype=torch.float32)
 
         # Keep the batched sample schema uniform. The full metadata row contains
-        # shape-dependent geometry dicts (cube: size_x/y/z, sphere: radius, etc.),
-        # which PyTorch's default collate cannot stack safely across a mixed batch.
+        # shape-dependent / multi-object dicts that default_collate cannot stack.
         return {
             "image": image_t,
             "state": state_t,
