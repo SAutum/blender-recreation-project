@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from br_scene_state import STATE_DIM
+DEFAULT_STATE_DIM = 9
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -50,18 +50,24 @@ class ImageEncoder(nn.Module):
 
 
 class ConditionalStateDenoiser(nn.Module):
-    def __init__(self, state_dim: int = STATE_DIM, cond_dim: int = 256, time_dim: int = 128) -> None:
+    def __init__(
+        self,
+        state_dim: int = DEFAULT_STATE_DIM,
+        cond_dim: int = 256,
+        time_dim: int = 128,
+    ) -> None:
         super().__init__()
+        self.state_dim = int(state_dim)
         self.image_encoder = ImageEncoder(cond_dim)
         self.time_embedding = SinusoidalTimeEmbedding(time_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(state_dim + cond_dim + time_dim, 512),
+            nn.Linear(self.state_dim + cond_dim + time_dim, 512),
             nn.SiLU(),
             nn.Linear(512, 512),
             nn.SiLU(),
             nn.Linear(512, 256),
             nn.SiLU(),
-            nn.Linear(256, state_dim),
+            nn.Linear(256, self.state_dim),
         )
 
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
@@ -114,7 +120,7 @@ class GaussianDiffusion:
         if image.shape[0] != 1:
             raise ValueError("sample() currently expects a single conditioning image")
         image_features = model.encode_image(image).repeat(n, 1)
-        x = torch.randn(n, STATE_DIM, device=image.device)
+        x = torch.randn(n, model.state_dim, device=image.device)
 
         for step in reversed(range(self.steps)):
             t = torch.full((n,), step, device=image.device, dtype=torch.long)
