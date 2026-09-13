@@ -252,6 +252,11 @@ def render_spec(
 
 def main() -> None:
     args = parse_args()
+    if not args.out.is_absolute():
+        args.out = REPO_ROOT / args.out
+    args.out = args.out.resolve()
+    print(f"[blender-recreation] Dataset output: {args.out}")
+
     rng = random.Random(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     image_dir = args.out / "images"
