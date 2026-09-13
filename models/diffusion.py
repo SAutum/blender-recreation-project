@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common.scene_state import STATE_DIM
+from br_scene_state import STATE_DIM
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -110,7 +110,6 @@ class GaussianDiffusion:
 
     @torch.no_grad()
     def sample(self, model: ConditionalStateDenoiser, image: torch.Tensor, n: int = 1) -> torch.Tensor:
-        """DDPM sampling in the 9-D scene-state space."""
         model.eval()
         if image.shape[0] != 1:
             raise ValueError("sample() currently expects a single conditioning image")
@@ -120,15 +119,12 @@ class GaussianDiffusion:
         for step in reversed(range(self.steps)):
             t = torch.full((n,), step, device=image.device, dtype=torch.long)
             pred_noise = model(x, t, image_features=image_features)
-
             alpha = self.alphas[step]
             alpha_bar = self.alpha_bars[step]
             beta = self.betas[step]
             mean = (x - (beta / torch.sqrt(1.0 - alpha_bar)) * pred_noise) / torch.sqrt(alpha)
-
             if step > 0:
-                noise = torch.randn_like(x)
-                x = mean + torch.sqrt(beta) * noise
+                x = mean + torch.sqrt(beta) * torch.randn_like(x)
             else:
                 x = mean
 
