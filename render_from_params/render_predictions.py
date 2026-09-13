@@ -11,7 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from batch_renderer.generate_dataset import build_scene, assert_cycles_active
+from batch_renderer.generate_dataset import assert_cycles_active, build_scene as build_scene_v1
+from batch_renderer.generate_dataset_v2 import build_scene as build_scene_v2
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +27,27 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _build_scene(scene_spec: dict, width: int, height: int, samples: int):
+    # v2 scenes carry an explicit objects list. v1 scenes carry a single top-level
+    # shape/geometry pair. Predicted cameras are always rendered exactly as decoded;
+    # never auto-fit during evaluation.
+    if "objects" in scene_spec:
+        return build_scene_v2(
+            scene_spec,
+            width,
+            height,
+            samples=samples,
+            fit_camera=False,
+        )
+    return build_scene_v1(
+        scene_spec,
+        width,
+        height,
+        samples=samples,
+        fit_camera=False,
+    )
+
+
 def render_prediction(
     scene_spec: dict,
     path: Path,
@@ -33,14 +55,7 @@ def render_prediction(
     height: int,
     samples: int,
 ) -> None:
-    # Deliberately do not fit or correct the predicted camera.
-    build_scene(
-        scene_spec,
-        width,
-        height,
-        samples=samples,
-        fit_camera=False,
-    )
+    _build_scene(scene_spec, width, height, samples)
     path.parent.mkdir(parents=True, exist_ok=True)
     bpy.context.scene.render.filepath = str(path)
     assert_cycles_active()
