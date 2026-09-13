@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity
 
-from common.scene_state import parameter_errors
+from br_scene_state import parameter_errors
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,13 +52,10 @@ def score_pair(target_path: Path, pred_path: Path) -> dict:
     iou = mask_iou(target, pred)
     target_rgb = composite_gray(target)
     pred_rgb = composite_gray(pred)
-
     ssim = float(structural_similarity(target_rgb, pred_rgb, channel_axis=2, data_range=1.0))
     ssim01 = float(np.clip((ssim + 1.0) * 0.5, 0.0, 1.0))
     mse = float(np.mean((target_rgb - pred_rgb) ** 2))
     psnr = float("inf") if mse <= 1e-12 else float(10.0 * math.log10(1.0 / mse))
-
-    # Primary v1 score: geometry/camera agreement should dominate via silhouette.
     main_score = 0.70 * iou + 0.30 * ssim01
     return {
         "main_score": main_score,
@@ -97,9 +94,11 @@ def main() -> None:
         metrics.append(record)
         grouped[target_id].append(record)
 
-    fieldnames = list(metrics[0].keys())
+    if not metrics:
+        raise RuntimeError("No prediction rows were scored")
+
     with (args.out / "metrics.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=list(metrics[0].keys()))
         writer.writeheader()
         writer.writerows(metrics)
 
