@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from common.scene_state import CAMERA_LENS_MM, encode_scene, safe_camera_distance
+from br_scene_state import CAMERA_LENS_MM, encode_scene, safe_camera_distance
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,27 +27,36 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--width", type=int, default=128)
     p.add_argument("--height", type=int, default=128)
+    p.add_argument("--samples", type=int, default=16, help="Cycles samples per render")
     return p.parse_args(argv)
 
 
 def clear_scene() -> None:
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
-    for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
-        # Orphan data from the previous sample can otherwise accumulate in long runs.
+    for datablocks in (
+        bpy.data.meshes,
+        bpy.data.curves,
+        bpy.data.materials,
+        bpy.data.cameras,
+        bpy.data.lights,
+    ):
         for block in list(datablocks):
             if block.users == 0:
                 datablocks.remove(block)
 
 
-def setup_render(width: int, height: int) -> None:
+def setup_render(width: int, height: int, samples: int = 16) -> None:
     scene = bpy.context.scene
-    scene.render.engine = "BLENDER_EEVEE_NEXT"
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = max(1, int(samples))
+    scene.cycles.seed = 0
     scene.render.resolution_x = width
     scene.render.resolution_y = height
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGBA"
+    scene.render.image_settings.color_depth = "8"
     scene.render.film_transparent = True
 
     world = scene.world or bpy.data.worlds.new("World")
@@ -55,12 +64,12 @@ def setup_render(width: int, height: int) -> None:
     world.use_nodes = True
     bg = world.node_tree.nodes.get("Background")
     if bg:
-        bg.inputs["Color"].default_value = (0.08, 0.08, 0.08, 1.0)
-        bg.inputs["Strength"].default_value = 0.8
+        bg.inputs["Color"].default_value = (0.05, 0.05, 0.05, 1.0)
+        bg.inputs["Strength"].default_value = 1.0
 
 
 def setup_fixed_lighting() -> None:
-    """A fixed, Blender-startup-like light. Lighting is never randomized in v1."""
+    """Fixed Blender-startup-style point light; never randomized in v1."""
     light_data = bpy.data.lights.new(name="FixedLight", type="POINT")
     light_data.energy = 1000.0
     light_obj = bpy.data.objects.new(name="FixedLight", object_data=light_data)
@@ -72,8 +81,9 @@ def make_material():
     mat = bpy.data.materials.new("PrimitiveMaterial")
     mat.use_nodes = True
     bsdf = mat.node_tree.nodes.get("Principled BSDF")
-    bsdf.inputs["Base Color"].default_value = (0.72, 0.72, 0.72, 1.0)
-    bsdf.inputs["Roughness"].default_value = 0.48
+    if bsdf:
+        bsdf.inputs["Base Color"].default_value = (0.72, 0.72, 0.72, 1.0)
+        bsdf.inputs["Roughness"].default_value = 0.48
     return mat
 
 
@@ -87,13 +97,23 @@ def create_shape(spec: dict):
         obj.dimensions = (g["size_x"], g["size_y"], g["size_z"])
         bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     elif shape == "sphere":
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=48, ring_count=24, radius=g["radius"], location=(0, 0, 0))
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=48,
+            ring_count=24,
+            radius=g["radius"],
+            location=(0, 0, 0),
+        )
         obj = bpy.context.object
     elif shape == "cylinder":
-        bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=g["radius"], depth=g["depth"], location=(0, 0, 0))
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=64,
+            radius=g["radius"],
+            depth=g["depth"],
+            location=(0, 0, 0),
+        )
         obj = bpy.context.object
     else:
-        raise ValueError(shape)
+        raise ValueError(f"Unknown shape: {shape}")
 
     obj.name = "TargetPrimitive"
     obj.data.materials.append(make_material())
@@ -102,6 +122,8 @@ def create_shape(spec: dict):
 
 def point_camera_at(camera_obj, target=(0.0, 0.0, 0.0)) -> None:
     direction = Vector(target) - camera_obj.location
+    if direction.length < 1e-8:
+        direction = Vector((0.0, 0.0, -1.0))
     camera_obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
@@ -109,6 +131,7 @@ def create_camera(spec: dict):
     camera_data = bpy.data.cameras.new("Camera")
     camera_data.lens = float(spec["camera"].get("lens_mm", CAMERA_LENS_MM))
     camera_data.sensor_width = 36.0
+    camera_data.clip_start = 0.01
     camera_obj = bpy.data.objects.new("Camera", camera_data)
     bpy.context.collection.objects.link(camera_obj)
     camera_obj.location = spec["camera"]["location"]
@@ -122,14 +145,19 @@ def _fully_in_frame(obj, camera_obj, border: float = 0.025) -> bool:
     for local_corner in obj.bound_box:
         world_corner = obj.matrix_world @ Vector(local_corner)
         p = world_to_camera_view(scene, camera_obj, world_corner)
-        if p.z <= 0 or p.x < border or p.x > 1.0 - border or p.y < border or p.y > 1.0 - border:
+        if (
+            p.z <= 0
+            or p.x < border
+            or p.x > 1.0 - border
+            or p.y < border
+            or p.y > 1.0 - border
+        ):
             return False
     return True
 
 
 def ensure_in_frame(spec: dict, obj, camera_obj) -> None:
-    """Move only along the current viewing ray until the whole object is inside frame."""
-    for _ in range(20):
+    for _ in range(30):
         bpy.context.view_layer.update()
         if _fully_in_frame(obj, camera_obj):
             spec["camera"]["location"] = [float(v) for v in camera_obj.location]
@@ -183,18 +211,31 @@ def choose_split(rng: random.Random) -> str:
     return "test"
 
 
-def build_scene(spec: dict, width: int, height: int):
+def build_scene(
+    spec: dict,
+    width: int,
+    height: int,
+    samples: int = 16,
+    fit_camera: bool = True,
+):
     clear_scene()
-    setup_render(width, height)
+    setup_render(width, height, samples)
     setup_fixed_lighting()
     obj = create_shape(spec)
     cam = create_camera(spec)
-    ensure_in_frame(spec, obj, cam)
+    if fit_camera:
+        ensure_in_frame(spec, obj, cam)
     return obj, cam
 
 
-def render_spec(spec: dict, output_path: Path, width: int = 128, height: int = 128) -> None:
-    build_scene(spec, width, height)
+def render_spec(
+    spec: dict,
+    output_path: Path,
+    width: int = 128,
+    height: int = 128,
+    samples: int = 16,
+) -> None:
+    build_scene(spec, width, height, samples=samples, fit_camera=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     bpy.context.scene.render.filepath = str(output_path)
     bpy.ops.render.render(write_still=True)
@@ -211,7 +252,13 @@ def main() -> None:
     with metadata_path.open("w", encoding="utf-8") as f:
         for idx in range(args.count):
             spec = sample_scene(rng)
-            build_scene(spec, args.width, args.height)
+            build_scene(
+                spec,
+                args.width,
+                args.height,
+                samples=args.samples,
+                fit_camera=True,
+            )
 
             image_rel = Path("images") / f"{idx:07d}.png"
             image_abs = args.out / image_rel
@@ -235,12 +282,15 @@ def main() -> None:
         "seed": args.seed,
         "width": args.width,
         "height": args.height,
-        "engine": "BLENDER_EEVEE_NEXT",
-        "lighting": "fixed Blender-startup-like point light + fixed world",
+        "engine": "CYCLES",
+        "samples": args.samples,
+        "lighting": "fixed Blender-startup-style point light + fixed world",
         "film_transparent": True,
         "state_dim": 9,
     }
-    (args.out / "dataset_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    (args.out / "dataset_config.json").write_text(
+        json.dumps(config, indent=2), encoding="utf-8"
+    )
     print(f"Dataset written to {args.out}")
 
 
