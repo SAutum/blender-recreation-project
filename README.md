@@ -26,9 +26,9 @@ The v2 state is fixed-length **34-D**:
  object_2: present + shape(3) + xyz(3) + euler_xyz(3) + geometry(3)]
 ```
 
-`models.train` and `models.infer` now detect the state dimension from the dataset/checkpoint, so the same model commands work for both v1 and v2. Old v1 checkpoints remain compatible.
+`models.train` and `models.infer` detect the state dimension from the dataset/checkpoint, so the same model commands work for both v1 and v2. Old v1 checkpoints remain compatible.
 
-### 1. Generate a v2 smoke dataset
+### 1. Generate a v2 dataset
 
 Run from the repository root:
 
@@ -37,7 +37,7 @@ Run from the repository root:
   --background `
   --python batch_renderer/generate_dataset_v2.py `
   -- `
-  --out data/v2_smoke5000 `
+  --out data/v2_5k `
   --count 5000 `
   --samples 16 `
   --seed 42
@@ -49,59 +49,65 @@ The generator rejects/resamples scenes that cannot keep all primitives in frame.
 
 ```powershell
 python -m models.train `
-  --data data/v2_smoke5000 `
-  --run results/runs/v2_smoke001 `
-  --epochs 50 `
+  --data data/v2_5k `
+  --run results/runs/v2_5k_e20 `
+  --epochs 20 `
   --batch-size 64
 ```
 
-### 3. Infer Blender scene states
+### 3. One-command post-training evaluation
+
+After training, run the entire validation pipeline with one command:
 
 ```powershell
-python -m models.infer `
-  --data data/v2_smoke5000 `
-  --checkpoint results/runs/v2_smoke001/best.pt `
-  --out results/runs/v2_smoke001/predictions.jsonl `
-  --split test `
+python tools/evaluate_run.py `
+  --data data/v2_5k `
+  --run results/runs/v2_5k_e20 `
   --samples-per-image 8 `
-  --limit 100
+  --limit 20
 ```
 
-### 4. Rerender predictions through Blender
+By default it uses `<run>/best.pt` and Blender 5.2 at:
 
-`render_predictions.py` auto-detects v1 vs v2 scene JSON.
-
-```powershell
-& "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" `
-  --background `
-  --python render_from_params/render_predictions.py `
-  -- `
-  --predictions results/runs/v2_smoke001/predictions.jsonl `
-  --out results/runs/v2_smoke001/pred_renders `
-  --samples 16
+```text
+C:\Program Files\Blender Foundation\Blender 5.2\blender.exe
 ```
 
-### 5. Random-valid-state and GT baselines
+The script runs, in order:
 
-```powershell
-python -m models.make_baselines `
-  --data data/v2_smoke5000 `
-  --targets-from results/runs/v2_smoke001/predictions.jsonl `
-  --out results/runs/v2_smoke001
+```text
+1. diffusion inference
+2. Blender rerender of diffusion predictions
+3. random-valid-state + GT baseline generation
+4. Blender rerender of random baseline
+5. Blender GT rerender sanity check
+6. benchmark
 ```
 
-Render `random_predictions.jsonl` and `gt_predictions.jsonl` with the same `render_predictions.py` command, then run:
+Outputs are written directly into the run directory:
+
+```text
+predictions.jsonl
+pred_renders/
+random_predictions.jsonl
+random_renders/
+gt_predictions.jsonl
+gt_renders/
+benchmark_summary.json
+benchmark_metrics.csv
+```
+
+Useful overrides:
 
 ```powershell
-python -m models.benchmark `
-  --data data/v2_smoke5000 `
-  --diffusion-predictions results/runs/v2_smoke001/predictions.jsonl `
-  --diffusion-renders results/runs/v2_smoke001/pred_renders `
-  --random-predictions results/runs/v2_smoke001/random_predictions.jsonl `
-  --random-renders results/runs/v2_smoke001/random_renders `
-  --gt-predictions results/runs/v2_smoke001/gt_predictions.jsonl `
-  --gt-renders results/runs/v2_smoke001/gt_renders `
-  --out results/runs/v2_smoke001
+python tools/evaluate_run.py `
+  --data data/v2_5k `
+  --run results/runs/v2_5k_e20 `
+  --checkpoint results/runs/v2_5k_e20/best.pt `
+  --samples-per-image 8 `
+  --limit 100 `
+  --render-samples 16 `
+  --blender "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
 ```
 
 The key comparison remains:
@@ -137,6 +143,7 @@ br_scene_state.py           v1 9-D codec
 br_scene_state_v2.py        v2 34-D codec
 models/                     dataset, diffusion, training, inference, scorer, benchmark
 render_from_params/         real Blender rerender of predictions
+tools/evaluate_run.py       one-command post-training validation pipeline
 results/                    local experiment outputs/reporting
 ```
 
