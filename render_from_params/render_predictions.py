@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from batch_renderer.generate_dataset import build_scene
+from batch_renderer.generate_dataset import build_scene, assert_cycles_active
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,11 +43,22 @@ def render_prediction(
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     bpy.context.scene.render.filepath = str(path)
+    assert_cycles_active()
     bpy.ops.render.render(write_still=True)
 
 
 def main() -> None:
     args = parse_args()
+    if not args.predictions.is_absolute():
+        args.predictions = REPO_ROOT / args.predictions
+    if not args.out.is_absolute():
+        args.out = REPO_ROOT / args.out
+    args.predictions = args.predictions.resolve()
+    args.out = args.out.resolve()
+
+    print(f"[blender-recreation] Predictions input: {args.predictions}")
+    print(f"[blender-recreation] Prediction render output: {args.out}")
+
     args.out.mkdir(parents=True, exist_ok=True)
     rows = [
         json.loads(line)
