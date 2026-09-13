@@ -68,6 +68,13 @@ def setup_render(width: int, height: int, samples: int = 16) -> None:
         bg.inputs["Strength"].default_value = 1.0
 
 
+def assert_cycles_active() -> None:
+    engine = bpy.context.scene.render.engine
+    print(f"[blender-recreation] Active render engine: {engine}")
+    if engine != "CYCLES":
+        raise RuntimeError(f"Expected CYCLES, but Blender reports {engine!r}")
+
+
 def setup_fixed_lighting() -> None:
     """Fixed Blender-startup-style point light; never randomized in v1."""
     light_data = bpy.data.lights.new(name="FixedLight", type="POINT")
@@ -220,6 +227,7 @@ def build_scene(
 ):
     clear_scene()
     setup_render(width, height, samples)
+    assert_cycles_active()
     setup_fixed_lighting()
     obj = create_shape(spec)
     cam = create_camera(spec)
@@ -238,6 +246,7 @@ def render_spec(
     build_scene(spec, width, height, samples=samples, fit_camera=True)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     bpy.context.scene.render.filepath = str(output_path)
+    assert_cycles_active()
     bpy.ops.render.render(write_still=True)
 
 
@@ -263,6 +272,7 @@ def main() -> None:
             image_rel = Path("images") / f"{idx:07d}.png"
             image_abs = args.out / image_rel
             bpy.context.scene.render.filepath = str(image_abs)
+            assert_cycles_active()
             bpy.ops.render.render(write_still=True)
 
             row = {
