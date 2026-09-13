@@ -53,9 +53,12 @@ class RenderedSceneDataset(Dataset):
         image_t = self.transform(image)
 
         state_t = torch.tensor(row["state"], dtype=torch.float32)
+
+        # Keep the batched sample schema uniform. The full metadata row contains
+        # shape-dependent geometry dicts (cube: size_x/y/z, sphere: radius, etc.),
+        # which PyTorch's default collate cannot stack safely across a mixed batch.
         return {
             "image": image_t,
             "state": state_t,
             "id": int(row["id"]),
-            "row": row,
         }
