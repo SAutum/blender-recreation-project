@@ -11,8 +11,6 @@ import numpy as np
 from PIL import Image
 from skimage.metrics import structural_similarity
 
-from br_scene_state import parameter_errors
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -66,6 +64,16 @@ def score_pair(target_path: Path, pred_path: Path) -> dict:
     }
 
 
+def scene_parameter_errors(target: dict, pred: dict) -> dict:
+    if "objects" in target or "objects" in pred:
+        from br_scene_state_v2 import parameter_errors
+
+        return parameter_errors(target, pred)
+    from br_scene_state import parameter_errors
+
+    return parameter_errors(target, pred)
+
+
 def main() -> None:
     args = parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -82,7 +90,7 @@ def main() -> None:
             raise FileNotFoundError(pred_path)
 
         image_metrics = score_pair(target_path, pred_path)
-        param_metrics = parameter_errors(row["target_scene"], row["pred_scene"])
+        param_metrics = scene_parameter_errors(row["target_scene"], row["pred_scene"])
         record = {
             "target_id": target_id,
             "sample_index": sample_index,
@@ -112,17 +120,36 @@ def main() -> None:
             "main_score_median": float(np.median([x["main_score"] for x in best])),
             "mask_iou_mean": float(np.mean([x["mask_iou"] for x in best])),
             "ssim_mean": float(np.mean([x["ssim"] for x in best])),
-            "shape_accuracy": float(np.mean([x["shape_correct"] for x in best])),
-            "camera_l2_mean": float(np.mean([x["camera_l2"] for x in best])),
-            "geometry_mae_mean": float(np.mean([x["geometry_mae"] for x in best])),
         },
         "all_samples": {
             "main_score_mean": float(np.mean([x["main_score"] for x in metrics])),
             "mask_iou_mean": float(np.mean([x["mask_iou"] for x in metrics])),
             "ssim_mean": float(np.mean([x["ssim"] for x in metrics])),
         },
-        "primary_metric_note": "Best-of-K image-space reconstruction score is primary; parameter errors are secondary diagnostics.",
+        "primary_metric_note": "Best-of-K image-space reconstruction score is primary; parameter errors in metrics.csv are secondary diagnostics.",
     }
+
+    numeric_param_keys = sorted(
+        key
+        for key in metrics[0]
+        if key
+        not in {
+            "target_id",
+            "sample_index",
+            "main_score",
+            "mask_iou",
+            "ssim",
+            "mse",
+            "psnr",
+            "target_image",
+            "pred_image",
+        }
+        and isinstance(metrics[0][key], (int, float))
+    )
+    summary["best_of_k_parameter_diagnostics"] = {
+        key: float(np.mean([float(x[key]) for x in best])) for key in numeric_param_keys
+    }
+
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
 
