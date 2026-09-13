@@ -23,6 +23,7 @@ from batch_renderer.generate_dataset import (
     setup_render,
 )
 from br_scene_state_v2 import (
+    CAMERA_POS_MAX,
     CAMERA_SENSOR_WIDTH_MM,
     FOCAL_MAX_MM,
     FOCAL_MIN_MM,
@@ -184,10 +185,15 @@ def create_object(spec: dict, index: int):
     rotation = spec["rotation_euler"]
 
     if shape == "cube":
-        bpy.ops.mesh.primitive_cube_add(size=1.0, location=location, rotation=rotation)
+        # Size the cube in local space first, then rotate it. Setting dimensions on
+        # an already-rotated cube would make the requested geometry depend on the
+        # world-aligned bounding box.
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
         obj = bpy.context.object
         obj.dimensions = (g["size_x"], g["size_y"], g["size_z"])
         bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        obj.rotation_mode = "XYZ"
+        obj.rotation_euler = rotation
     elif shape == "sphere":
         bpy.ops.mesh.primitive_uv_sphere_add(
             segments=48,
@@ -277,7 +283,10 @@ def ensure_scene_in_frame(spec: dict, objects, camera_obj) -> None:
             # Reject tiny scenes rather than accepting an uninformative image.
             if max(width, height) < 0.22:
                 raise RuntimeError("Generated scene is too small in the camera frame")
-            camera_spec["location"] = [float(v) for v in camera_obj.location]
+            location = [float(v) for v in camera_obj.location]
+            if max(abs(v) for v in location) >= CAMERA_POS_MAX * 0.98:
+                raise RuntimeError("Generated camera lies outside the v2 state normalization range")
+            camera_spec["location"] = location
             camera_spec["rotation_euler"] = [float(v) for v in camera_obj.rotation_euler]
             return
 
@@ -360,9 +369,10 @@ def main() -> None:
     with metadata_path.open("w", encoding="utf-8") as f:
         for idx in range(args.count):
             last_error: Exception | None = None
+            spec = None
             for _attempt in range(args.max_scene_attempts):
-                spec = sample_scene(rng)
                 try:
+                    spec = sample_scene(rng)
                     build_scene(
                         spec,
                         args.width,
@@ -374,7 +384,7 @@ def main() -> None:
                     break
                 except RuntimeError as exc:
                     last_error = exc
-            if last_error is not None:
+            if last_error is not None or spec is None:
                 raise RuntimeError(
                     f"Failed to generate valid scene for sample {idx} after "
                     f"{args.max_scene_attempts} attempts"
