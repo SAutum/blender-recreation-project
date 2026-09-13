@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from common.scene_state import decode_state
+from br_scene_state import decode_state
 from models.dataset import RenderedSceneDataset
 from models.diffusion import ConditionalStateDenoiser, GaussianDiffusion
 
@@ -48,8 +48,6 @@ def main() -> None:
         for batch in tqdm(loader, desc="sampling"):
             image = batch["image"].to(device)
             states = diffusion.sample(model, image, n=args.samples_per_image).cpu().numpy()
-
-            # DataLoader recursively batches dicts, so use the original dataset row by id.
             target_id = int(batch["id"].item())
             target_row = next(row for row in dataset.rows if int(row["id"]) == target_id)
 
