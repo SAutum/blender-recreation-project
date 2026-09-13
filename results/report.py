@@ -103,7 +103,7 @@ def make_examples(run: Path, n_each: int = 3) -> str | None:
 
 
 def tex_escape(value: str) -> str:
-    replacements = {
+    mapping = {
         "\\": r"\textbackslash{}",
         "&": r"\&",
         "%": r"\%",
@@ -112,10 +112,10 @@ def tex_escape(value: str) -> str:
         "_": r"\_",
         "{": r"\{",
         "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
     }
-    for src, dst in replacements.items():
-        value = value.replace(src, dst)
-    return value
+    return "".join(mapping.get(ch, ch) for ch in value)
 
 
 def main() -> None:
