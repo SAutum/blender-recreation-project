@@ -29,10 +29,11 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, out_dim: int = 256) -> None:
+    def __init__(self, out_dim: int = 256, in_channels: int = 3) -> None:
         super().__init__()
+        self.in_channels = int(in_channels)
         self.net = nn.Sequential(
-            nn.Conv2d(3, 32, 5, stride=2, padding=2),
+            nn.Conv2d(self.in_channels, 32, 5, stride=2, padding=2),
             nn.SiLU(),
             nn.Conv2d(32, 64, 3, stride=2, padding=1),
             nn.SiLU(),
@@ -55,10 +56,12 @@ class ConditionalStateDenoiser(nn.Module):
         state_dim: int = DEFAULT_STATE_DIM,
         cond_dim: int = 256,
         time_dim: int = 128,
+        image_channels: int = 3,
     ) -> None:
         super().__init__()
         self.state_dim = int(state_dim)
-        self.image_encoder = ImageEncoder(cond_dim)
+        self.image_channels = int(image_channels)
+        self.image_encoder = ImageEncoder(cond_dim, in_channels=self.image_channels)
         self.time_embedding = SinusoidalTimeEmbedding(time_dim)
         self.mlp = nn.Sequential(
             nn.Linear(self.state_dim + cond_dim + time_dim, 512),
@@ -118,7 +121,7 @@ class GaussianDiffusion:
     def sample(self, model: ConditionalStateDenoiser, image: torch.Tensor, n: int = 1) -> torch.Tensor:
         model.eval()
         if image.shape[0] != 1:
-            raise ValueError("sample() currently expects a single conditioning image")
+            raise ValueError("sample() currently expects one conditioning sample at a time")
         image_features = model.encode_image(image).repeat(n, 1)
         x = torch.randn(n, model.state_dim, device=image.device)
 
