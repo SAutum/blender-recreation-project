@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -19,10 +20,15 @@ from batch_renderer.generate_dataset_v3 import (
     _fully_in_frame,
     _scene_projected_extent,
     build_scene,
+    look_at_rotation,
     sample_scene,
     split_for_index,
 )
-from br_scene_state_v3 import STATE_DIM, encode_scene
+from br_scene_state_v3 import (
+    STATE_DIM,
+    camera_location_from_parameters,
+    encode_scene,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,26 +43,62 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples", type=int, default=16)
     p.add_argument("--max-scene-attempts", type=int, default=100)
     p.add_argument(
-        "--stereo-angle-deg",
+        "--stereo-baseline",
         type=float,
-        default=4.0,
-        help="Azimuth separation between the left/anchor view and right view.",
+        default=0.35,
+        help=(
+            "Left-to-right camera separation in Blender units. Default 0.35 BU is "
+            "roughly equivalent to a 4 degree separation at a 5 BU viewing distance. "
+            "Use 0.063 BU for an approximately 63 mm human IPD if 1 BU = 1 m."
+        ),
     )
     p.add_argument("--resume", action="store_true")
     return p.parse_args(argv)
 
 
-def _wrap_pi(angle: float) -> float:
-    return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+def _make_right_view(left_spec: dict, stereo_baseline: float) -> dict:
+    """Translate the second camera laterally by a fixed binocular baseline.
 
-
-def _make_right_view(left_spec: dict, stereo_angle_deg: float) -> dict:
+    The right camera still converges on the exact same target as the anchor camera.
+    We convert the translated camera location back into v3's legal spherical camera
+    parameters so rendering remains fully compatible with the v3 state model.
+    """
     right = copy.deepcopy(left_spec)
-    right["camera"]["azimuth"] = _wrap_pi(
-        float(right["camera"]["azimuth"]) + math.radians(float(stereo_angle_deg))
+    cam = right["camera"]
+    target = Vector(cam["target"])
+
+    left_location = Vector(
+        camera_location_from_parameters(
+            cam["azimuth"],
+            cam["elevation"],
+            cam["distance"],
+            cam["target"],
+        )
     )
-    # build_scene/create_camera deterministically recomputes location + Euler rotation
-    # from azimuth/elevation/distance/target/roll, so no independent camera rotation is added.
+
+    # Camera-local +X is the natural left/right eye axis. Including roll here keeps
+    # the stereo translation aligned with the actual camera frame rather than a
+    # fixed world-space horizontal direction.
+    rotation = look_at_rotation(left_location, target, cam["roll"])
+    camera_right_axis = rotation.to_matrix() @ Vector((1.0, 0.0, 0.0))
+    if camera_right_axis.length < 1e-8:
+        raise RuntimeError("Could not determine stereo camera right axis")
+    camera_right_axis.normalize()
+
+    right_location = left_location + camera_right_axis * float(stereo_baseline)
+    outward = right_location - target
+    distance = outward.length
+    if distance < 1e-8:
+        raise RuntimeError("Stereo companion camera collapsed onto target")
+
+    azimuth = math.atan2(outward.y, outward.x)
+    elevation = math.asin(max(-1.0, min(1.0, outward.z / distance)))
+
+    cam["azimuth"] = float(azimuth)
+    cam["elevation"] = float(elevation)
+    cam["distance"] = float(distance)
+    cam["location"] = [float(v) for v in right_location]
+    # target, roll and focal length intentionally remain unchanged.
     return right
 
 
@@ -131,13 +173,17 @@ def _render(spec: dict, output_path: Path, width: int, height: int, samples: int
 
 def main() -> None:
     args = parse_args()
-    if not 0.0 < args.stereo_angle_deg <= 15.0:
-        raise ValueError("--stereo-angle-deg must be > 0 and <= 15 degrees")
+    if not 0.0 < args.stereo_baseline <= 1.0:
+        raise ValueError("--stereo-baseline must be > 0 and <= 1.0 Blender units")
 
     if not args.out.is_absolute():
         args.out = REPO_ROOT / args.out
     args.out = args.out.resolve()
     print(f"[blender-recreation] v4 paired-view dataset output: {args.out}")
+    print(
+        f"[blender-recreation] Stereo baseline: {args.stereo_baseline:.4f} BU "
+        "(use 0.063 for approximate human IPD at 1 BU = 1 m)"
+    )
 
     args.out.mkdir(parents=True, exist_ok=True)
     image_dir = args.out / "images"
@@ -179,7 +225,7 @@ def main() -> None:
                             fit_camera=True,
                         )
 
-                        companion = _make_right_view(candidate, args.stereo_angle_deg)
+                        companion = _make_right_view(candidate, args.stereo_baseline)
                         _validate_view(
                             companion,
                             args.width,
@@ -228,7 +274,7 @@ def main() -> None:
                     "scene": left_spec,
                     "state": encode_scene(left_spec).tolist(),
                     "stereo": {
-                        "angle_deg": float(args.stereo_angle_deg),
+                        "baseline": float(args.stereo_baseline),
                         "right_camera": right_spec["camera"],
                     },
                 }
@@ -259,9 +305,15 @@ def main() -> None:
         "primitive_types": ["cube", "sphere", "cylinder"],
         "conditioning": "two RGB views concatenated channel-wise (6 channels)",
         "anchor_view": "left image exactly matches the target v3 Blender state",
-        "stereo_angle_deg": float(args.stereo_angle_deg),
+        "stereo_baseline": float(args.stereo_baseline),
         "stereo_relation": (
-            "right view keeps target/elevation/distance/roll/focal fixed and offsets camera azimuth"
+            "right camera is translated along anchor-camera local X by a fixed baseline; "
+            "both views converge on the same target with matching roll and focal length"
+        ),
+        "human_ipd_reference_bu": 0.063,
+        "default_baseline_note": (
+            "0.35 BU is intentionally exaggerated for stronger disparity; it is roughly "
+            "equivalent to a 4 degree separation at a 5 BU viewing distance"
         ),
         "resumable_generation": True,
     }
