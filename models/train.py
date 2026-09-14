@@ -28,6 +28,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--image-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--encoder",
+        default="legacy",
+        choices=["legacy", "spatial_pair"],
+        help="Image conditioning encoder. spatial_pair is the v5 shared-CNN spatial fusion encoder.",
+    )
+    p.add_argument(
+        "--view-mode",
+        default="dataset",
+        choices=["dataset", "mono", "stereo"],
+        help=(
+            "How paired-view rows are presented to the model. mono=(left,left), "
+            "stereo=(left,right), dataset=use images exactly as stored."
+        ),
+    )
     return p.parse_args()
 
 
@@ -68,6 +83,8 @@ def save_checkpoint(
             "image_size": args.image_size,
             "state_dim": int(state_dim),
             "image_channels": int(image_channels),
+            "encoder_type": args.encoder,
+            "view_mode": args.view_mode,
         },
         path,
     )
@@ -79,8 +96,18 @@ def main() -> None:
     args.run.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_ds = RenderedSceneDataset(args.data, "train", args.image_size)
-    val_ds = RenderedSceneDataset(args.data, "val", args.image_size)
+    train_ds = RenderedSceneDataset(
+        args.data,
+        "train",
+        args.image_size,
+        view_mode=args.view_mode,
+    )
+    val_ds = RenderedSceneDataset(
+        args.data,
+        "val",
+        args.image_size,
+        view_mode=args.view_mode,
+    )
     if train_ds.state_dim != val_ds.state_dim:
         raise RuntimeError(
             f"Train/val state dim mismatch: {train_ds.state_dim} vs {val_ds.state_dim}"
@@ -90,8 +117,19 @@ def main() -> None:
             f"Train/val image channel mismatch: {train_ds.image_channels} vs "
             f"{val_ds.image_channels}"
         )
+
     state_dim = train_ds.state_dim
     image_channels = train_ds.image_channels
+    if args.encoder == "spatial_pair":
+        if args.view_mode not in {"mono", "stereo"}:
+            raise RuntimeError(
+                "For the controlled v5 comparison, --encoder spatial_pair requires "
+                "--view-mode mono or --view-mode stereo"
+            )
+        if image_channels != 6:
+            raise RuntimeError(
+                f"spatial_pair expects two RGB branches / 6 channels, got {image_channels}"
+            )
 
     train_loader = DataLoader(
         train_ds,
@@ -111,9 +149,16 @@ def main() -> None:
     model = ConditionalStateDenoiser(
         state_dim=state_dim,
         image_channels=image_channels,
+        encoder_type=args.encoder,
     ).to(device)
+    parameter_count = sum(p.numel() for p in model.parameters())
     diffusion = GaussianDiffusion(steps=args.diffusion_steps, device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    print(f"Encoder:     {args.encoder}")
+    print(f"View mode:   {args.view_mode}")
+    print(f"Image chans: {image_channels}")
+    print(f"Parameters:  {parameter_count:,}")
 
     run_config = vars(args).copy()
     run_config["data"] = str(run_config["data"])
@@ -122,7 +167,13 @@ def main() -> None:
     run_config["state_dim"] = state_dim
     run_config["image_channels"] = image_channels
     run_config["views_per_sample"] = train_ds.views_per_sample
-    run_config["model"] = "ConditionalStateDenoiser(CNN image encoder + MLP DDPM state denoiser)"
+    run_config["source_views_per_sample"] = train_ds.source_views_per_sample
+    run_config["parameter_count"] = parameter_count
+    run_config["model"] = (
+        "ConditionalStateDenoiser(shared spatial pair CNN + spatial fusion + MLP DDPM)"
+        if args.encoder == "spatial_pair"
+        else "ConditionalStateDenoiser(legacy CNN image encoder + MLP DDPM)"
+    )
     run_config["started_at"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     run_config["train_samples"] = len(train_ds)
     run_config["val_samples"] = len(val_ds)
