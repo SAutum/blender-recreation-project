@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--encoder",
         default="spatial_pair",
-        choices=["legacy", "spatial_pair"],
+        choices=["legacy", "spatial_pair", "attention_pair"],
     )
     p.add_argument(
         "--view-mode",
@@ -98,8 +98,8 @@ def main() -> None:
     if train_ds.image_channels != val_ds.image_channels:
         raise RuntimeError("Train/val image channel mismatch")
 
-    if args.encoder == "spatial_pair" and train_ds.image_channels != 6:
-        raise RuntimeError("spatial_pair encoder requires paired input / 6 channels")
+    if args.encoder in {"spatial_pair", "attention_pair"} and train_ds.image_channels != 6:
+        raise RuntimeError(f"{args.encoder} encoder requires paired input / 6 channels")
 
     train_loader = DataLoader(
         train_ds,
