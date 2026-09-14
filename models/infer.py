@@ -39,7 +39,7 @@ def _decoder_for_state_dim(state_dim: int):
         return decode_state
     raise RuntimeError(
         f"No scene decoder registered for state_dim={state_dim}. "
-        "Expected v1=9, v2=34, or v3=35."
+        "Expected v1=9, v2=34, or v3/v4=35."
     )
 
 
@@ -52,13 +52,23 @@ def main() -> None:
     image_size = int(checkpoint.get("image_size", 128))
     dataset = RenderedSceneDataset(args.data, args.split, image_size=image_size, limit=args.limit)
     state_dim = int(checkpoint.get("state_dim", dataset.state_dim))
+    image_channels = int(checkpoint.get("image_channels", 3))
+
     if state_dim != dataset.state_dim:
         raise RuntimeError(
             f"Checkpoint state_dim={state_dim} but dataset state_dim={dataset.state_dim}"
         )
+    if image_channels != dataset.image_channels:
+        raise RuntimeError(
+            f"Checkpoint image_channels={image_channels} but dataset provides "
+            f"{dataset.image_channels}. Use a checkpoint trained on the same number of views."
+        )
 
     decode_state = _decoder_for_state_dim(state_dim)
-    model = ConditionalStateDenoiser(state_dim=state_dim).to(device)
+    model = ConditionalStateDenoiser(
+        state_dim=state_dim,
+        image_channels=image_channels,
+    ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
@@ -82,6 +92,9 @@ def main() -> None:
                     "target_id": target_id,
                     "sample_index": sample_index,
                     "target_image": target_row["image"],
+                    "conditioning_images": target_row.get(
+                        "images", [target_row["image"]]
+                    ),
                     "target_scene": target_row["scene"],
                     "target_state": target_row["state"],
                     "pred_state": state.tolist(),
