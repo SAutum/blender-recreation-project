@@ -47,18 +47,40 @@ class RenderedSceneDataset(Dataset):
                     f"got {len(row['state'])} for id={row.get('id')}"
                 )
 
+        first_images = self.rows[0].get("images", [self.rows[0]["image"]])
+        self.views_per_sample = len(first_images)
+        if self.views_per_sample < 1:
+            raise RuntimeError(f"Dataset row contains no conditioning images: {self.root}")
+
+        for row in self.rows:
+            view_paths = row.get("images", [row["image"]])
+            if len(view_paths) != self.views_per_sample:
+                raise RuntimeError(
+                    f"Mixed view counts in {self.root}: expected {self.views_per_sample}, "
+                    f"got {len(view_paths)} for id={row.get('id')}"
+                )
+
+        # Each view is composited to RGB and views are concatenated channel-wise.
+        # v1-v3 therefore remain 3-channel; v4 stereo pairs become 6-channel.
+        self.image_channels = 3 * self.views_per_sample
+
     def __len__(self) -> int:
         return len(self.rows)
 
-    def __getitem__(self, index: int):
-        row = self.rows[index]
-        image = Image.open(self.root / row["image"]).convert("RGBA")
+    def _load_rgb_tensor(self, relative_path: str) -> torch.Tensor:
+        image = Image.open(self.root / relative_path).convert("RGBA")
 
         # Composite transparent renders onto a fixed gray background while keeping
-        # the actual training image 3-channel RGB.
+        # every individual conditioning view 3-channel RGB.
         bg = Image.new("RGBA", image.size, (32, 32, 32, 255))
         image = Image.alpha_composite(bg, image).convert("RGB")
-        image_t = self.transform(image)
+        return self.transform(image)
+
+    def __getitem__(self, index: int):
+        row = self.rows[index]
+        view_paths = row.get("images", [row["image"]])
+        views = [self._load_rgb_tensor(path) for path in view_paths]
+        image_t = torch.cat(views, dim=0)
 
         state_t = torch.tensor(row["state"], dtype=torch.float32)
 
