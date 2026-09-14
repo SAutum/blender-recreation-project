@@ -21,6 +21,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples-per-image", type=int, default=8)
     p.add_argument("--limit", type=int, default=500)
     p.add_argument("--seed", type=int, default=123)
+    p.add_argument(
+        "--shuffle-conditioning",
+        action="store_true",
+        help=(
+            "Condition each target on the next dataset sample instead of its own image(s). "
+            "This is a deterministic ablation for testing whether the model actually uses images."
+        ),
+    )
     return p.parse_args()
 
 
@@ -63,6 +71,8 @@ def main() -> None:
             f"Checkpoint image_channels={image_channels} but dataset provides "
             f"{dataset.image_channels}. Use a checkpoint trained on the same number of views."
         )
+    if args.shuffle_conditioning and len(dataset) < 2:
+        raise RuntimeError("Shuffled conditioning needs at least two samples")
 
     decode_state = _decoder_for_state_dim(state_dim)
     model = ConditionalStateDenoiser(
@@ -80,20 +90,38 @@ def main() -> None:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     row_by_id = {int(row["id"]): row for row in dataset.rows}
+    mode = "shuffled conditioning" if args.shuffle_conditioning else "normal conditioning"
+    print(f"Inference mode: {mode}")
+
     with args.out.open("w", encoding="utf-8") as f:
-        for batch in tqdm(loader, desc="sampling"):
-            image = batch["image"].to(device)
-            states = diffusion.sample(model, image, n=args.samples_per_image).cpu().numpy()
+        for dataset_index, batch in enumerate(tqdm(loader, desc="sampling")):
             target_id = int(batch["id"].item())
             target_row = row_by_id[target_id]
+
+            if args.shuffle_conditioning:
+                conditioning_index = (dataset_index + 1) % len(dataset)
+                conditioning_sample = dataset[conditioning_index]
+                image = conditioning_sample["image"].unsqueeze(0).to(device)
+                conditioning_id = int(conditioning_sample["id"])
+                conditioning_row = row_by_id[conditioning_id]
+            else:
+                image = batch["image"].to(device)
+                conditioning_id = target_id
+                conditioning_row = target_row
+
+            states = diffusion.sample(model, image, n=args.samples_per_image).cpu().numpy()
 
             for sample_index, state in enumerate(states):
                 prediction = {
                     "target_id": target_id,
                     "sample_index": sample_index,
                     "target_image": target_row["image"],
-                    "conditioning_images": target_row.get(
-                        "images", [target_row["image"]]
+                    "conditioning_target_id": conditioning_id,
+                    "conditioning_images": conditioning_row.get(
+                        "images", [conditioning_row["image"]]
+                    ),
+                    "conditioning_mode": (
+                        "shuffled" if args.shuffle_conditioning else "normal"
                     ),
                     "target_scene": target_row["scene"],
                     "target_state": target_row["state"],
