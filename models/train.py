@@ -29,6 +29,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help=(
+            "Stop when validation loss has not improved for this many consecutive epochs. "
+            "Use 0 to disable early stopping."
+        ),
+    )
+    p.add_argument(
         "--encoder",
         default="legacy",
         choices=["legacy", "spatial_pair"],
@@ -85,6 +94,7 @@ def save_checkpoint(
             "image_channels": int(image_channels),
             "encoder_type": args.encoder,
             "view_mode": args.view_mode,
+            "early_stopping_patience": int(args.early_stopping_patience),
         },
         path,
     )
@@ -92,6 +102,9 @@ def save_checkpoint(
 
 def main() -> None:
     args = parse_args()
+    if args.early_stopping_patience < 0:
+        raise ValueError("--early-stopping-patience must be >= 0")
+
     seed_everything(args.seed)
     args.run.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +172,10 @@ def main() -> None:
     print(f"View mode:   {args.view_mode}")
     print(f"Image chans: {image_channels}")
     print(f"Parameters:  {parameter_count:,}")
+    if args.early_stopping_patience > 0:
+        print(f"Early stop:  patience={args.early_stopping_patience}")
+    else:
+        print("Early stop:  disabled")
 
     run_config = vars(args).copy()
     run_config["data"] = str(run_config["data"])
@@ -185,6 +202,9 @@ def main() -> None:
         writer.writeheader()
 
     best_val = float("inf")
+    best_epoch = 0
+    epochs_without_improvement = 0
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_losses = []
@@ -219,8 +239,11 @@ def main() -> None:
             state_dim,
             image_channels,
         )
+
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch
+            epochs_without_improvement = 0
             save_checkpoint(
                 args.run / "best.pt",
                 model,
@@ -230,8 +253,24 @@ def main() -> None:
                 state_dim,
                 image_channels,
             )
+        else:
+            epochs_without_improvement += 1
 
-    print(f"Training complete. Best validation loss: {best_val:.6f}")
+        if (
+            args.early_stopping_patience > 0
+            and epochs_without_improvement >= args.early_stopping_patience
+        ):
+            print(
+                "Early stopping: validation loss has not improved for "
+                f"{args.early_stopping_patience} epochs. "
+                f"Best epoch={best_epoch}, best val={best_val:.6f}."
+            )
+            break
+
+    print(
+        f"Training complete. Best validation loss: {best_val:.6f} "
+        f"at epoch {best_epoch}."
+    )
 
     try:
         curve_path = plot_history_csv(history_path, args.run / "training_curve.png")
