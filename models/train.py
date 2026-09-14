@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from models.dataset import RenderedSceneDataset
 from models.diffusion import ConditionalStateDenoiser, GaussianDiffusion
+from models.training_plot import plot_history_csv
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +152,12 @@ def main() -> None:
             save_checkpoint(args.run / "best.pt", model, args, epoch, val_loss, state_dim)
 
     print(f"Training complete. Best validation loss: {best_val:.6f}")
+
+    try:
+        curve_path = plot_history_csv(history_path, args.run / "training_curve.png")
+        print(f"Training curve written to {curve_path}")
+    except Exception as exc:
+        print(f"Warning: could not create training curve: {exc}")
 
 
 if __name__ == "__main__":
