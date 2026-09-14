@@ -57,6 +57,7 @@ def save_checkpoint(
     epoch: int,
     val_loss: float,
     state_dim: int,
+    image_channels: int,
 ) -> None:
     torch.save(
         {
@@ -66,6 +67,7 @@ def save_checkpoint(
             "diffusion_steps": args.diffusion_steps,
             "image_size": args.image_size,
             "state_dim": int(state_dim),
+            "image_channels": int(image_channels),
         },
         path,
     )
@@ -83,7 +85,13 @@ def main() -> None:
         raise RuntimeError(
             f"Train/val state dim mismatch: {train_ds.state_dim} vs {val_ds.state_dim}"
         )
+    if train_ds.image_channels != val_ds.image_channels:
+        raise RuntimeError(
+            f"Train/val image channel mismatch: {train_ds.image_channels} vs "
+            f"{val_ds.image_channels}"
+        )
     state_dim = train_ds.state_dim
+    image_channels = train_ds.image_channels
 
     train_loader = DataLoader(
         train_ds,
@@ -100,7 +108,10 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
 
-    model = ConditionalStateDenoiser(state_dim=state_dim).to(device)
+    model = ConditionalStateDenoiser(
+        state_dim=state_dim,
+        image_channels=image_channels,
+    ).to(device)
     diffusion = GaussianDiffusion(steps=args.diffusion_steps, device=device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
@@ -109,6 +120,8 @@ def main() -> None:
     run_config["run"] = str(run_config["run"])
     run_config["device"] = str(device)
     run_config["state_dim"] = state_dim
+    run_config["image_channels"] = image_channels
+    run_config["views_per_sample"] = train_ds.views_per_sample
     run_config["model"] = "ConditionalStateDenoiser(CNN image encoder + MLP DDPM state denoiser)"
     run_config["started_at"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     run_config["train_samples"] = len(train_ds)
@@ -146,10 +159,26 @@ def main() -> None:
             writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_loss"])
             writer.writerow({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
 
-        save_checkpoint(args.run / "last.pt", model, args, epoch, val_loss, state_dim)
+        save_checkpoint(
+            args.run / "last.pt",
+            model,
+            args,
+            epoch,
+            val_loss,
+            state_dim,
+            image_channels,
+        )
         if val_loss < best_val:
             best_val = val_loss
-            save_checkpoint(args.run / "best.pt", model, args, epoch, val_loss, state_dim)
+            save_checkpoint(
+                args.run / "best.pt",
+                model,
+                args,
+                epoch,
+                val_loss,
+                state_dim,
+                image_channels,
+            )
 
     print(f"Training complete. Best validation loss: {best_val:.6f}")
 
