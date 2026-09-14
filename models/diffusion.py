@@ -29,6 +29,8 @@ class SinusoidalTimeEmbedding(nn.Module):
 
 
 class ImageEncoder(nn.Module):
+    """Legacy early-fusion encoder used by v1-v4 checkpoints."""
+
     def __init__(self, out_dim: int = 256, in_channels: int = 3) -> None:
         super().__init__()
         self.in_channels = int(in_channels)
@@ -50,6 +52,58 @@ class ImageEncoder(nn.Module):
         return self.net(image)
 
 
+class SpatialPairImageEncoder(nn.Module):
+    """v5 paired-view encoder with shared weights and spatial fusion.
+
+    Input is always two RGB views concatenated channel-wise (6 channels).
+    The same CNN encodes both branches independently. Fusion happens while the
+    feature maps are still spatial, using left, right, and signed right-left
+    features. Only after fusion do we compress to a 256-D conditioning vector.
+
+    Mono and stereo runs therefore use exactly the same architecture:
+      mono   = (left, left)
+      stereo = (left, right)
+    """
+
+    def __init__(self, out_dim: int = 256) -> None:
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Conv2d(3, 32, 5, stride=2, padding=2),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(128, 128, 3, stride=2, padding=1),
+            nn.SiLU(),
+        )
+        self.fusion = nn.Sequential(
+            nn.Conv2d(128 * 3, 256, 3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(256, 128, 3, padding=1),
+            nn.SiLU(),
+            # Preserve a coarse 4x4 spatial layout instead of collapsing directly
+            # to 1x1 as the legacy encoder does.
+            nn.AdaptiveAvgPool2d((4, 4)),
+        )
+        self.projection = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 4 * 4, out_dim),
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        if image.shape[1] != 6:
+            raise ValueError(
+                f"SpatialPairImageEncoder expects 6 channels (two RGB views), got {image.shape[1]}"
+            )
+        left = image[:, :3]
+        right = image[:, 3:6]
+        left_f = self.shared(left)
+        right_f = self.shared(right)
+        fused = torch.cat([left_f, right_f, right_f - left_f], dim=1)
+        return self.projection(self.fusion(fused))
+
+
 class ConditionalStateDenoiser(nn.Module):
     def __init__(
         self,
@@ -57,11 +111,26 @@ class ConditionalStateDenoiser(nn.Module):
         cond_dim: int = 256,
         time_dim: int = 128,
         image_channels: int = 3,
+        encoder_type: str = "legacy",
     ) -> None:
         super().__init__()
         self.state_dim = int(state_dim)
         self.image_channels = int(image_channels)
-        self.image_encoder = ImageEncoder(cond_dim, in_channels=self.image_channels)
+        self.encoder_type = str(encoder_type)
+
+        if self.encoder_type == "legacy":
+            self.image_encoder = ImageEncoder(cond_dim, in_channels=self.image_channels)
+        elif self.encoder_type == "spatial_pair":
+            if self.image_channels != 6:
+                raise ValueError(
+                    "encoder_type='spatial_pair' requires image_channels=6 (two RGB branches)"
+                )
+            self.image_encoder = SpatialPairImageEncoder(cond_dim)
+        else:
+            raise ValueError(
+                f"Unknown encoder_type={self.encoder_type!r}; expected legacy or spatial_pair"
+            )
+
         self.time_embedding = SinusoidalTimeEmbedding(time_dim)
         self.mlp = nn.Sequential(
             nn.Linear(self.state_dim + cond_dim + time_dim, 512),
