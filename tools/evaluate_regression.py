@@ -18,7 +18,7 @@ DEFAULT_BLENDER = Path(r"C:\Program Files\Blender Foundation\Blender 5.2\blender
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Evaluate direct regression in Blender against Random Best@K and GT rerender."
+        description="Evaluate direct regression in Blender against Random@1, Random Best@K, and GT."
     )
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--run", type=Path, required=True)
@@ -119,8 +119,8 @@ def main() -> None:
         ]
     )
 
-    # 3) Ask the existing baseline generator for Random Best@K. We repeat only
-    # target metadata here; the regression prediction itself remains deterministic.
+    # 3) Ask the existing baseline generator for K random valid states per target.
+    # Regression stays deterministic; this gives both Random@1 and Random Best@K.
     regression_rows = read_jsonl(predictions)
     repeated_rows: list[dict] = []
     for row in regression_rows:
@@ -171,37 +171,49 @@ def main() -> None:
     target_ids = sorted(set(regression) & set(random_baseline) & set(gt))
     rows = []
     for target_id in target_ids:
-        r = best_record(regression[target_id])
-        rand = best_record(random_baseline[target_id])
+        reg = best_record(regression[target_id])
+        random_records = sorted(random_baseline[target_id], key=lambda x: x["sample_index"])
+        rand1 = random_records[0]
+        randk = best_record(random_records)
         g = best_record(gt[target_id])
         rows.append(
             {
                 "target_id": target_id,
-                "regression_score": float(r["main_score"]),
-                "random_best_score": float(rand["main_score"]),
+                "regression_score": float(reg["main_score"]),
+                "random_1_score": float(rand1["main_score"]),
+                "random_best_score": float(randk["main_score"]),
                 "gt_score": float(g["main_score"]),
-                "regression_minus_random": float(r["main_score"] - rand["main_score"]),
-                "regression_beats_random": int(r["main_score"] > rand["main_score"]),
+                "regression_minus_random_1": float(reg["main_score"] - rand1["main_score"]),
+                "regression_minus_random_best": float(reg["main_score"] - randk["main_score"]),
+                "regression_beats_random_1": int(reg["main_score"] > rand1["main_score"]),
+                "regression_beats_random_best": int(reg["main_score"] > randk["main_score"]),
             }
         )
 
     regression_mean = float(np.mean([r["regression_score"] for r in rows]))
-    random_mean = float(np.mean([r["random_best_score"] for r in rows]))
+    random1_mean = float(np.mean([r["random_1_score"] for r in rows]))
+    randomk_mean = float(np.mean([r["random_best_score"] for r in rows]))
     gt_mean = float(np.mean([r["gt_score"] for r in rows]))
-    win_fraction = float(np.mean([r["regression_beats_random"] for r in rows]))
+    win1_fraction = float(np.mean([r["regression_beats_random_1"] for r in rows]))
+    wink_fraction = float(np.mean([r["regression_beats_random_best"] for r in rows]))
 
     summary = {
         "targets": len(rows),
         "regression": {"main_score_mean": regression_mean, "k": 1},
-        "random_best_of_k": {"main_score_mean": random_mean, "k": args.random_k},
+        "random_1": {"main_score_mean": random1_mean, "k": 1},
+        "random_best_of_k": {"main_score_mean": randomk_mean, "k": args.random_k},
         "gt_rerender": {"main_score_mean": gt_mean},
-        "regression_vs_random": {
-            "mean_score_advantage": regression_mean - random_mean,
-            "fraction_targets_regression_wins": win_fraction,
+        "regression_vs_random_1": {
+            "mean_score_advantage": regression_mean - random1_mean,
+            "fraction_targets_regression_wins": win1_fraction,
+        },
+        "regression_vs_random_best_of_k": {
+            "mean_score_advantage": regression_mean - randomk_mean,
+            "fraction_targets_regression_wins": wink_fraction,
         },
         "note": (
-            "Regression is deterministic (K=1). Random uses Best@K so this intentionally "
-            "keeps the same strong random baseline used by the diffusion benchmark."
+            "Regression is deterministic (K=1). Random@1 is the fair one-sample comparison; "
+            "Random Best@K preserves the strong baseline used in the diffusion experiments."
         ),
     }
 
@@ -215,12 +227,15 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print("\n=== Direct Regression Benchmark ===")
-    print(f"Targets:             {len(rows)}")
-    print(f"GT rerender:         {gt_mean:.4f}")
-    print(f"Regression @1:       {regression_mean:.4f}")
-    print(f"Random best@{args.random_k}:      {random_mean:.4f}")
-    print(f"Regression - random: {regression_mean - random_mean:+.4f}")
-    print(f"Regression wins:     {win_fraction:.1%} of targets")
+    print(f"Targets:                 {len(rows)}")
+    print(f"GT rerender:             {gt_mean:.4f}")
+    print(f"Regression @1:           {regression_mean:.4f}")
+    print(f"Random @1:               {random1_mean:.4f}")
+    print(f"Random best@{args.random_k}:          {randomk_mean:.4f}")
+    print(f"Regression - random@1:   {regression_mean - random1_mean:+.4f}")
+    print(f"Regression - random@K:   {regression_mean - randomk_mean:+.4f}")
+    print(f"Wins vs random@1:        {win1_fraction:.1%} of targets")
+    print(f"Wins vs random best@K:   {wink_fraction:.1%} of targets")
     print(f"Saved: {summary_path}")
     print(f"Saved: {csv_path}")
 
