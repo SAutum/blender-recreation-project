@@ -47,7 +47,7 @@ def _decoder_for_state_dim(state_dim: int):
         return decode_state
     raise RuntimeError(
         f"No scene decoder registered for state_dim={state_dim}. "
-        "Expected v1=9, v2=34, or v3/v4=35."
+        "Expected v1=9, v2=34, or v3/v4/v5=35."
     )
 
 
@@ -58,7 +58,15 @@ def main() -> None:
 
     checkpoint = torch.load(args.checkpoint, map_location=device)
     image_size = int(checkpoint.get("image_size", 128))
-    dataset = RenderedSceneDataset(args.data, args.split, image_size=image_size, limit=args.limit)
+    view_mode = str(checkpoint.get("view_mode", "dataset"))
+    encoder_type = str(checkpoint.get("encoder_type", "legacy"))
+    dataset = RenderedSceneDataset(
+        args.data,
+        args.split,
+        image_size=image_size,
+        limit=args.limit,
+        view_mode=view_mode,
+    )
     state_dim = int(checkpoint.get("state_dim", dataset.state_dim))
     image_channels = int(checkpoint.get("image_channels", 3))
 
@@ -69,7 +77,7 @@ def main() -> None:
     if image_channels != dataset.image_channels:
         raise RuntimeError(
             f"Checkpoint image_channels={image_channels} but dataset provides "
-            f"{dataset.image_channels}. Use a checkpoint trained on the same number of views."
+            f"{dataset.image_channels}. Use a checkpoint trained on the same view mode."
         )
     if args.shuffle_conditioning and len(dataset) < 2:
         raise RuntimeError("Shuffled conditioning needs at least two samples")
@@ -78,6 +86,7 @@ def main() -> None:
     model = ConditionalStateDenoiser(
         state_dim=state_dim,
         image_channels=image_channels,
+        encoder_type=encoder_type,
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -92,6 +101,8 @@ def main() -> None:
     row_by_id = {int(row["id"]): row for row in dataset.rows}
     mode = "shuffled conditioning" if args.shuffle_conditioning else "normal conditioning"
     print(f"Inference mode: {mode}")
+    print(f"Encoder:        {encoder_type}")
+    print(f"View mode:      {view_mode}")
 
     with args.out.open("w", encoding="utf-8") as f:
         for dataset_index, batch in enumerate(tqdm(loader, desc="sampling")):
@@ -120,6 +131,8 @@ def main() -> None:
                     "conditioning_images": conditioning_row.get(
                         "images", [conditioning_row["image"]]
                     ),
+                    "conditioning_view_mode": view_mode,
+                    "conditioning_encoder": encoder_type,
                     "conditioning_mode": (
                         "shuffled" if args.shuffle_conditioning else "normal"
                     ),
