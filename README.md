@@ -4,6 +4,84 @@ Minimal experiment for **image(s) -> Blender scene state -> real Blender rerende
 
 The primary metric is image-space reconstruction after sending the predicted state back through Blender. Parameter errors are secondary because inverse graphics can have multiple valid states that render similarly.
 
+## v5: controlled mono vs stereo spatial-encoder experiment
+
+v5 reuses the existing `data/v4_stereo_5k` paired-view dataset. No new renders are required.
+
+The purpose is to isolate the value of the second view while keeping the network architecture and parameter count identical:
+
+```text
+mono:   (left, left)  -> shared CNN branches -> spatial fusion -> 256-D condition
+stereo: (left, right) -> shared CNN branches -> spatial fusion -> 256-D condition
+```
+
+The two RGB branches share CNN weights. Their spatial feature maps are fused using:
+
+```text
+left features
+right features
+signed (right - left) features
+```
+
+Fusion occurs before global compression, and a coarse 4x4 spatial layout is retained before projecting to the final conditioning vector. This avoids the legacy encoder's immediate `AdaptiveAvgPool2d(1)` bottleneck.
+
+Because mono duplicates the left image into both branches, mono and stereo use exactly the same model architecture and parameter count. The only experimental difference is whether the second branch contains new visual information.
+
+### Train mono control
+
+```powershell
+python -m models.train `
+  --data data/v4_stereo_5k `
+  --run results/runs/v5_mono_5k_s1000_e100 `
+  --epochs 100 `
+  --batch-size 64 `
+  --diffusion-steps 1000 `
+  --encoder spatial_pair `
+  --view-mode mono
+```
+
+### Train stereo
+
+```powershell
+python -m models.train `
+  --data data/v4_stereo_5k `
+  --run results/runs/v5_stereo_5k_s1000_e100 `
+  --epochs 100 `
+  --batch-size 64 `
+  --diffusion-steps 1000 `
+  --encoder spatial_pair `
+  --view-mode stereo
+```
+
+At startup, training prints the parameter count. It should be identical for the mono and stereo runs.
+
+### Evaluate both with the same benchmark
+
+```powershell
+python tools/evaluate_run.py `
+  --data data/v4_stereo_5k `
+  --run results/runs/v5_mono_5k_s1000_e100 `
+  --samples-per-image 8 `
+  --limit 100
+```
+
+```powershell
+python tools/evaluate_run.py `
+  --data data/v4_stereo_5k `
+  --run results/runs/v5_stereo_5k_s1000_e100 `
+  --samples-per-image 8 `
+  --limit 100
+```
+
+The cleanest measure of second-view value is:
+
+```text
+Stereo Diffusion best@8 - Mono Diffusion best@8
+Stereo win rate             vs Mono win rate
+```
+
+The existing `tools/conditioning_ablation.py` also works with v5 checkpoints because inference restores the checkpoint's encoder type and view mode automatically.
+
 ## v4: dual-view conditioning experiment
 
 v4 keeps the v3 35-D Blender state and intrinsically valid camera representation, but each scene now has **two nearby rendered views**.
@@ -109,7 +187,7 @@ look-at target + roll -> camera rotation
 
 So camera position and orientation cannot disagree independently. Evaluation still does **not** auto-fit or repair the predicted camera after inference.
 
-v3/v4 use the same fixed-length **35-D** state:
+v3/v4/v5 use the same fixed-length **35-D** state:
 
 ```text
 [num_objects,
@@ -160,10 +238,11 @@ batch_renderer/
   generate_dataset_v4.py    v4 paired-view/stereo renderer
 br_scene_state.py           v1 9-D codec
 br_scene_state_v2.py        v2 34-D codec
-br_scene_state_v3.py        v3/v4 35-D codec
+br_scene_state_v3.py        v3/v4/v5 35-D codec
 models/                     dataset, diffusion, training, inference, scorer, benchmark
 render_from_params/         real Blender rerender of predictions
 tools/evaluate_run.py       one-command post-training validation pipeline
+tools/conditioning_ablation.py normal-vs-shuffled image-conditioning diagnostic
 results/                    local experiment outputs/reporting
 ```
 
