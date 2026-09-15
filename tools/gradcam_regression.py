@@ -5,11 +5,11 @@ import json
 import sys
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
-from matplotlib import cm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -145,7 +145,8 @@ def resize_cam(cam: torch.Tensor, height: int, width: int) -> np.ndarray:
 
 
 def make_overlay(rgb: np.ndarray, cam_values: np.ndarray, alpha: float) -> np.ndarray:
-    cmap = cm.get_cmap("inferno")
+    # matplotlib >=3.9 removed matplotlib.cm.get_cmap; use the public colormap registry.
+    cmap = matplotlib.colormaps["inferno"]
     heat_rgb = np.round(cmap(cam_values)[..., :3] * 255.0).astype(np.uint8)
     mixed = (1.0 - alpha) * rgb.astype(np.float32) + alpha * heat_rgb.astype(np.float32)
     return np.clip(mixed, 0, 255).astype(np.uint8)
